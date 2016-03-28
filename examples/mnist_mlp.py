@@ -1,13 +1,16 @@
 from __future__ import division, print_function
+
+import theano
+from theano import tensor
+
 from blocks.algorithms import GradientDescent, AdaDelta
+from blocks.bricks.conv import ConvolutionalSequence
 from blocks.bricks.cost import SquaredError, AbsoluteError, \
     CategoricalCrossEntropy, BinaryCrossEntropy
 from blocks.extensions import Printing, FinishAfter
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.graph import ComputationGraph
 from blocks.main_loop import MainLoop
-
-from theano import tensor
 
 from blocks.bricks import MLP, Rectifier, Tanh, Linear, Softmax, Logistic, \
     Identity
@@ -21,6 +24,10 @@ from adversarial_autoencoder.algorithm import SequentialTrainingAlgorithm, \
     SequentialTrainingDataMonitoring
 from theano.sandbox.rng_mrg import MRG_RandomStreams
 import numpy as np
+
+seed = 123
+np.random.seed(seed=seed)
+symbolic_rng = MRG_RandomStreams(seed=seed)
 
 dataset = MNIST(('train',))
 
@@ -43,12 +50,12 @@ data_stream = ScaleAndShift(
     shift=-1.0
 )
 
-dims = [28*28, 28*2, 12]
+dims = [28*28, 128, 64, 2]
 # dims = [28*28, 8]
 # activations = [Rectifier()]
 
 encoder = MLP(
-    activations=[Rectifier(), Identity()],
+    activations=[Rectifier(), Rectifier(), Identity()],
     dims=dims,
     weights_init=IsotropicGaussian(0.01),
     biases_init=Constant(0.0)
@@ -56,49 +63,74 @@ encoder = MLP(
 encoder.initialize()
 
 decoder = MLP(
-    activations=[Rectifier(), Tanh()],
+    activations=[Rectifier(), Rectifier(), Tanh()],
     dims=dims[::-1],
     weights_init=IsotropicGaussian(0.01),
     biases_init=Constant(0.0)
 )
 decoder.initialize()
 
-adversarial_predictor = MLP(
+adversarial_predictor = MLP(  # TODO Change to convolutional network!
     activations=[Rectifier(), Rectifier(), Logistic()],
-    dims=[encoder.output_dim, encoder.output_dim*2, encoder.output_dim, 1],
+    dims=[28*28, 64, 64, 1],
     weights_init=IsotropicGaussian(0.01),
     biases_init=Constant(0.0)
 )
 adversarial_predictor.initialize()
 
 
+# RECONSTRUCTION
+data = tensor.matrix('features')
+data_encoded = encoder.apply(data)  # 'data' as opposed to 'prior'
+data_decoded = decoder.apply(data_encoded)
+cost_reconstruction = SquaredError().apply(
+    data,
+    data_decoded
+)
+cost_reconstruction.name = 'cost_reconstruction'
+cg_reconstruction = ComputationGraph(cost_reconstruction)
 
-x = tensor.matrix('features')
-z = encoder.apply(x)
+# ADVERSARIAL
+prior = symbolic_rng.normal(data_encoded.shape)
+prior_decoded = decoder.apply(prior)
 
-x_rec = decoder.apply(z)
+adversarial_input = tensor.concatenate(
+    [data_decoded, prior_decoded],
+    axis=0
+)
+adversarial_prediction = adversarial_predictor.apply(
+    adversarial_input
+)
+data_target = tensor.zeros((data.shape[0], 1))  # 'negative' examples
+prior_target = tensor.ones((prior.shape[0], 1))  # 'positive' examples
+adversarial_target = tensor.concatenate([data_target, prior_target])
 
-rng = MRG_RandomStreams(seed=123)
-z_prior = rng.normal((batch_size, encoder.output_dim))  # ok?
-z_prior_enc = tensor.concatenate([z_prior, z], axis=0)
-y = tensor.constant(np.array([[1]]*batch_size + [[0]]*batch_size).astype('int64'))
-y_hat = adversarial_predictor.apply(z_prior_enc)
-
-cost_rec = SquaredError().apply(x, x_rec)
-cost_rec.name = 'cost_rec'
-cg_rec = ComputationGraph(cost_rec)
-
-cost_adversarial = BinaryCrossEntropy().apply(y, y_hat)
+cost_adversarial = BinaryCrossEntropy().apply(
+    adversarial_target,
+    adversarial_prediction
+)
 cost_adversarial.name = 'cost_adversarial'
 cg_adversarial = ComputationGraph(cost_adversarial)
 
-cost_rec_prior = cost_rec - 10000 * cost_adversarial
-cost_rec_prior.name = 'cost_rec_prior'
 
-algorithm_rec_prior = GradientDescent(
-    cost=cost_rec_prior,
+# CONFUSION COST
+adversarial_prior_prediction = adversarial_predictor.apply(
+    prior_decoded
+)
+cost_confusion = BinaryCrossEntropy().apply(
+    tensor.zeros((prior.shape[0], 1)),  # 'negative' examples, make it belive it is part of data distribution
+    adversarial_prior_prediction
+)
+cost_confusion.name = 'cost_confusion'
+
+
+cost_autoencoder = cost_reconstruction + 10 * cost_confusion
+cost_autoencoder.name = 'cost_autoencoder'
+
+algorithm_autoencoder = GradientDescent(
+    cost=cost_autoencoder,
     step_rule=AdaDelta(),
-    parameters=cg_rec.parameters,
+    parameters=cg_reconstruction.parameters,
     on_unused_sources='warn'
 )
 
@@ -108,12 +140,11 @@ algorithm_adversarial = GradientDescent(
     parameters=cg_adversarial.parameters,
     on_unused_sources='warn'
 )
-
 main_loop = MainLoop(
     algorithm=SequentialTrainingAlgorithm(
         algorithm_steps=[
-            algorithm_rec_prior,
-            algorithm_adversarial
+            algorithm_adversarial,
+            algorithm_autoencoder
         ]
     ),
     data_stream=data_stream,
@@ -121,11 +152,15 @@ main_loop = MainLoop(
         SequentialTrainingDataMonitoring(
             traing_data_monitorings=[
                 TrainingDataMonitoring(
-                    variables=[cost_rec, cost_rec_prior],
+                    variables=[cost_adversarial],
                     after_epoch=True
                 ),
                 TrainingDataMonitoring(
-                    variables=[cost_adversarial],
+                    variables=[
+                        cost_autoencoder,
+                        cost_reconstruction,
+                        cost_confusion
+                    ],
                     after_epoch=True
                 )
             ],
@@ -134,4 +169,17 @@ main_loop = MainLoop(
         Printing(after_epoch=True),
         FinishAfter(after_n_epochs=10)
     ]
+)
+
+
+main_loop.run()
+
+reconstruct_f = theano.function(
+    inputs=[data],
+    outputs=data_decoded
+)
+
+decode_f = theano.function(
+    inputs=[data_encoded],
+    outputs=data_decoded
 )
