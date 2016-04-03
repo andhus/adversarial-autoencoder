@@ -1,29 +1,28 @@
 from __future__ import division, print_function
 
+import numpy as np
 import theano
+
 from theano import tensor
+from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from blocks.algorithms import GradientDescent, AdaDelta
-from blocks.bricks.conv import ConvolutionalSequence
-from blocks.bricks.cost import SquaredError, AbsoluteError, \
-    CategoricalCrossEntropy, BinaryCrossEntropy
+from blocks.bricks.cost import SquaredError, BinaryCrossEntropy
 from blocks.extensions import Printing, FinishAfter
 from blocks.extensions.monitoring import TrainingDataMonitoring
 from blocks.graph import ComputationGraph
 from blocks.main_loop import MainLoop
-
-from blocks.bricks import MLP, Rectifier, Tanh, Linear, Softmax, Logistic, \
-    Identity
+from blocks.bricks import MLP, Rectifier, Tanh, Logistic, Identity
 from blocks.initialization import IsotropicGaussian, Constant
 
 from fuel.datasets import MNIST
 from fuel.streams import DataStream
 from fuel.schemes import ShuffledScheme
 from fuel.transformers import Flatten, ScaleAndShift
-from adversarial_autoencoder.algorithm import SequentialTrainingAlgorithm, \
-    SequentialTrainingDataMonitoring
-from theano.sandbox.rng_mrg import MRG_RandomStreams
-import numpy as np
+
+from adversarial_autoencoder.algorithm import SequentialTrainingAlgorithm
+from adversarial_autoencoder.monitoring import SequentialTrainingDataMonitoring
+
 
 seed = 123
 np.random.seed(seed=seed)
@@ -50,9 +49,7 @@ data_stream = ScaleAndShift(
     shift=-1.0
 )
 
-dims = [28*28, 128, 64, 2]
-# dims = [28*28, 8]
-# activations = [Rectifier()]
+dims = [28*28, 128, 64, 12]
 
 encoder = MLP(
     activations=[Rectifier(), Rectifier(), Identity()],
@@ -150,7 +147,7 @@ main_loop = MainLoop(
     data_stream=data_stream,
     extensions=[
         SequentialTrainingDataMonitoring(
-            traing_data_monitorings=[
+            training_data_monitoring_steps=[
                 TrainingDataMonitoring(
                     variables=[cost_adversarial],
                     after_epoch=True
@@ -167,9 +164,10 @@ main_loop = MainLoop(
             after_epoch=True
         ),
         Printing(after_epoch=True),
-        FinishAfter(after_n_epochs=10)
+        FinishAfter(after_n_epochs=100)
     ]
 )
+
 
 
 main_loop.run()
