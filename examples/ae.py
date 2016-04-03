@@ -68,15 +68,6 @@ decoder = MLP(
 )
 decoder.initialize()
 
-adversarial_predictor = MLP(  # TODO Change to convolutional network!
-    activations=[Rectifier(), Rectifier(), Logistic()],
-    dims=[28*28, 64, 64, 1],
-    weights_init=IsotropicGaussian(0.01),
-    biases_init=Constant(0.0)
-)
-adversarial_predictor.initialize()
-
-
 # RECONSTRUCTION
 data = tensor.matrix('features')
 data_encoded = encoder.apply(data)  # 'data' as opposed to 'prior'
@@ -88,64 +79,17 @@ cost_reconstruction = SquaredError().apply(
 cost_reconstruction.name = 'cost_reconstruction'
 cg_reconstruction = ComputationGraph(cost_reconstruction)
 
-# ADVERSARIAL
-prior = symbolic_rng.normal(data_encoded.shape)
-prior_decoded = decoder.apply(prior)
-
-adversarial_input = tensor.concatenate(
-    [data_decoded, prior_decoded],
-    axis=0
-)
-adversarial_prediction = adversarial_predictor.apply(
-    adversarial_input
-)
-data_target = tensor.zeros((data.shape[0], 1))  # 'negative' examples
-prior_target = tensor.ones((prior.shape[0], 1))  # 'positive' examples
-adversarial_target = tensor.concatenate([data_target, prior_target])
-
-cost_adversarial = BinaryCrossEntropy().apply(
-    adversarial_target,
-    adversarial_prediction
-)
-cost_adversarial.name = 'cost_adversarial'
-cg_adversarial = ComputationGraph(cost_adversarial)
-
-
-# CONFUSION COST
-adversarial_prior_prediction = adversarial_predictor.apply(
-    prior_decoded
-)
-cost_confusion = BinaryCrossEntropy().apply(
-    tensor.zeros((prior.shape[0], 1)),  # 'negative' examples, make it belive it is part of data distribution
-    adversarial_prior_prediction
-)
-cost_confusion.name = 'cost_confusion'
-
-
-cost_autoencoder = cost_reconstruction + 10 * cost_confusion
-cost_autoencoder.name = 'cost_autoencoder'
-
-algorithm_autoencoder = GradientDescent(
-    cost=cost_autoencoder,
-    step_rule=Momentum(learning_rate=0.05, momentum=0.5),
+algorithm_reconstruction = GradientDescent(
+    cost=cost_reconstruction,
+    step_rule=AdaDelta(),
     parameters=cg_reconstruction.parameters,
     on_unused_sources='warn'
 )
 
-from blocks.filter import VariableFilter
-
-
-algorithm_adversarial = GradientDescent(
-    cost=cost_adversarial,
-    step_rule=Momentum(learning_rate=0.03, momentum=0.5),
-    parameters=cg_adversarial.parameters,
-    on_unused_sources='warn'
-)
 main_loop = MainLoop(
     algorithm=SequentialTrainingAlgorithm(
         algorithm_steps=[
-            algorithm_adversarial,
-            algorithm_autoencoder
+            algorithm_reconstruction
         ]
     ),
     data_stream=data_stream,
@@ -153,23 +97,22 @@ main_loop = MainLoop(
         SequentialTrainingDataMonitoring(
             training_data_monitoring_steps=[
                 TrainingDataMonitoring(
-                    variables=[cost_adversarial],
-                    after_epoch=True
-                ),
-                TrainingDataMonitoring(
                     variables=[
-                        cost_autoencoder,
                         cost_reconstruction,
-                        cost_confusion
                     ],
-                    after_epoch=True
+                    every_n_batches=50
                 )
             ],
-            after_epoch=True
+            every_n_batches=50
         ),
         Printing(after_epoch=True),
         FinishAfter(after_n_epochs=100),
-        Plot()
+        Plot(
+            document='AE',
+            channels=[[cost_reconstruction.name]],
+            start_server=True,
+            every_n_batches=50
+        )
     ]
 )
 
