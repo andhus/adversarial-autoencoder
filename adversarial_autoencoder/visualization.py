@@ -9,15 +9,20 @@ def plot_image_batch(
     fig=None,
     nrows=10,
     ncols=10,
+    size=None
 ):
-    """ Plots the first 100 samples of a batch of images in a 10x10 grid.
-
-    # TODO set figure size based on nrows, ncols
+    """ Plots the first (nrows * ncols) samples of a batch of images in a
+    nrows x ncols grid.
 
     Parameters
     ----------
-    batch : np.array(shape=(<N>,0,28,28)), where <N> must be larger than 100
+    batch : np.array(shape=(<N>,0,28,28))
+        where <N> must be larger than nrows * ncols
     figure_ : bokeh.plotting.Figure | None
+    nrows : int
+    ncols : int
+    size : int | None
+        number width and height of plot in pixels
 
     Returns
     -------
@@ -34,5 +39,9 @@ def plot_image_batch(
     )
     fig.x_range = Range1d(0, ncols)
     fig.y_range = Range1d(0, nrows)
+
+    if size:
+        fig.plot_width = size
+        fig.plot_height = size
 
     return fig

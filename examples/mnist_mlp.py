@@ -1,5 +1,4 @@
 from __future__ import division, print_function
-from blocks_extras.extensions.plot import Plot
 
 import numpy as np
 import theano
@@ -15,6 +14,9 @@ from blocks.graph import ComputationGraph
 from blocks.main_loop import MainLoop
 from blocks.bricks import MLP, Rectifier, Tanh, Logistic, Identity
 from blocks.initialization import IsotropicGaussian, Constant
+from blocks.filter import VariableFilter
+
+from blocks_extras.extensions.plot import Plot
 
 from fuel.datasets import MNIST
 from fuel.streams import DataStream
@@ -31,7 +33,7 @@ symbolic_rng = MRG_RandomStreams(seed=seed)
 
 dataset = MNIST(('train',))
 
-batch_size = 120
+batch_size = 1000
 data_stream = DataStream.default_stream(
     dataset=dataset,
     iteration_scheme=ShuffledScheme(
@@ -50,10 +52,10 @@ data_stream = ScaleAndShift(
     shift=-1.0
 )
 
-dims = [28*28, 128, 64, 12]
+dims = [28*28, 256, 128, 32, 2]
 
 encoder = MLP(
-    activations=[Rectifier(), Rectifier(), Identity()],
+    activations=[Rectifier() for dim in dims[1:-1]] + [Identity()],
     dims=dims,
     weights_init=IsotropicGaussian(0.01),
     biases_init=Constant(0.0)
@@ -61,7 +63,7 @@ encoder = MLP(
 encoder.initialize()
 
 decoder = MLP(
-    activations=[Rectifier(), Rectifier(), Tanh()],
+    activations=[Rectifier() for dim in dims[1:-1]] + [Tanh()],
     dims=dims[::-1],
     weights_init=IsotropicGaussian(0.01),
     biases_init=Constant(0.0)
@@ -70,7 +72,7 @@ decoder.initialize()
 
 adversarial_predictor = MLP(  # TODO Change to convolutional network!
     activations=[Rectifier(), Rectifier(), Logistic()],
-    dims=[28*28, 64, 64, 1],
+    dims=[28*28, 256, 128, 1],
     weights_init=IsotropicGaussian(0.01),
     biases_init=Constant(0.0)
 )
@@ -115,32 +117,36 @@ cg_adversarial = ComputationGraph(cost_adversarial)
 adversarial_prior_prediction = adversarial_predictor.apply(
     prior_decoded
 )
-cost_confusion = BinaryCrossEntropy().apply(
+cost_confusion_factor = 30.0
+cost_confusion = cost_confusion_factor * BinaryCrossEntropy().apply(
     tensor.zeros((prior.shape[0], 1)),  # 'negative' examples, make it belive it is part of data distribution
     adversarial_prior_prediction
 )
 cost_confusion.name = 'cost_confusion'
 
-
-cost_autoencoder = cost_reconstruction + 10 * cost_confusion
+cost_autoencoder = cost_reconstruction + cost_confusion
 cost_autoencoder.name = 'cost_autoencoder'
 
 algorithm_autoencoder = GradientDescent(
     cost=cost_autoencoder,
-    step_rule=Momentum(learning_rate=0.05, momentum=0.5),
+    step_rule=AdaDelta(),
     parameters=cg_reconstruction.parameters,
     on_unused_sources='warn'
 )
 
-from blocks.filter import VariableFilter
-
+vf = VariableFilter(bricks=adversarial_predictor.children)
+adversarial_parameters = vf(cg_adversarial.parameters)
 
 algorithm_adversarial = GradientDescent(
     cost=cost_adversarial,
-    step_rule=Momentum(learning_rate=0.03, momentum=0.5),
-    parameters=cg_adversarial.parameters,
+    step_rule=AdaDelta(),
+    parameters=adversarial_parameters,
     on_unused_sources='warn'
 )
+
+
+# Main Loop
+monitor_kwargs = {'every_n_batches': 100}
 main_loop = MainLoop(
     algorithm=SequentialTrainingAlgorithm(
         algorithm_steps=[
@@ -154,7 +160,7 @@ main_loop = MainLoop(
             training_data_monitoring_steps=[
                 TrainingDataMonitoring(
                     variables=[cost_adversarial],
-                    after_epoch=True
+                    **monitor_kwargs
                 ),
                 TrainingDataMonitoring(
                     variables=[
@@ -162,18 +168,24 @@ main_loop = MainLoop(
                         cost_reconstruction,
                         cost_confusion
                     ],
-                    after_epoch=True
+                    **monitor_kwargs
                 )
             ],
-            after_epoch=True
+            **monitor_kwargs
         ),
         Printing(after_epoch=True),
-        FinishAfter(after_n_epochs=100),
-        Plot()
+        Plot(
+            document='MLP AdvAE',
+            channels=[
+                [cost_adversarial.name],
+                [cost_autoencoder.name, cost_reconstruction.name, cost_confusion.name]
+            ],
+            start_server=True,
+            **monitor_kwargs
+        ),
+        FinishAfter(after_n_epochs=1000)
     ]
 )
-
-
 
 main_loop.run()
 
