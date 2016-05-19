@@ -3,7 +3,7 @@ from __future__ import division, print_function
 from blocks.extensions import SimpleExtension
 from blocks.extensions.monitoring import TrainingDataMonitoring
 
-from adversarial_autoencoder.algorithm import SequentialTrainingAlgorithm
+from algorithm import SequentialTrainingAlgorithm
 
 
 class SequentialTrainingDataMonitoring(SimpleExtension):
